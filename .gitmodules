@@ -1,0 +1,4 @@
+[submodule "GlobalBase"]
+	path = GlobalBase
+	url = https://github.com/RayShark0605/GlobalBase
+	branch = master
