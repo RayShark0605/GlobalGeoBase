@@ -25,6 +25,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DelayLoadRuntime.cpp" />
+    <ClCompile Include="DllMain.cpp" />
     <ClCompile Include="GeoCrs.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
@@ -146,6 +147,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>GlobalBase.lib;gdal.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <DelayLoadDLLs>gdal.dll</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

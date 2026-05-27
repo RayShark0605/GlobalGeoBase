@@ -1,5 +1,6 @@
 ﻿#include "GeoCrs.h"
 
+#include "DelayLoadRuntime.h"
 #include "GB_Math.h"
 #include "GB_ReadWriteLock.h"
 
@@ -542,11 +543,13 @@ struct GeoCrs::Impl
 GeoCrs::GeoCrs()
     : impl_(new Impl())
 {
+    InitializeRuntime();
 }
 
 GeoCrs::GeoCrs(const OGRSpatialReference& spatialReference)
     : impl_(new Impl())
 {
+    InitializeRuntime();
     SetFromOgrSpatialReference(spatialReference);
 }
 
@@ -623,6 +626,12 @@ bool GeoCrs::TryFromUserInput(const std::string& userInput, GeoCrs* crs, bool al
 
 bool GeoCrs::SetFromUserInput(const std::string& userInput, bool allowFileAccess, bool allowNetworkAccess)
 {
+    if (!InitializeRuntime())
+    {
+        Reset();
+        return false;
+    }
+
     const std::string trimmedUserInput = TrimAscii(userInput);
     if (trimmedUserInput.empty())
     {
@@ -679,6 +688,12 @@ bool GeoCrs::TryFromEpsg(int epsgCode, GeoCrs* crs)
 
 bool GeoCrs::SetFromEpsg(int epsgCode)
 {
+    if (!InitializeRuntime())
+    {
+        Reset();
+        return false;
+    }
+
     if (epsgCode <= 0)
     {
         Reset();
@@ -723,6 +738,12 @@ bool GeoCrs::TryFromAuthorityCode(const std::string& authorityName, const std::s
 
 bool GeoCrs::SetFromAuthorityCode(const std::string& authorityName, const std::string& authorityCode)
 {
+    if (!InitializeRuntime())
+    {
+        Reset();
+        return false;
+    }
+
     const std::string trimmedAuthorityName = TrimAscii(authorityName);
     const std::string trimmedAuthorityCode = TrimAscii(authorityCode);
     if (trimmedAuthorityName.empty() || trimmedAuthorityCode.empty())
@@ -736,6 +757,12 @@ bool GeoCrs::SetFromAuthorityCode(const std::string& authorityName, const std::s
 
 bool GeoCrs::SetFromOgrSpatialReference(const OGRSpatialReference& spatialReference)
 {
+    if (!InitializeRuntime())
+    {
+        Reset();
+        return false;
+    }
+
     if (spatialReference.IsEmpty())
     {
         Reset();

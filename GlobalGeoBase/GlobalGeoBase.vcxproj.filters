@@ -29,6 +29,9 @@
     <ClCompile Include="GeoCrs.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="DllMain.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="DelayLoadRuntime.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
