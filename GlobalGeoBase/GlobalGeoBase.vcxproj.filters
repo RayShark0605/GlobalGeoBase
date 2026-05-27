@@ -24,6 +24,9 @@
     <ClInclude Include="DelayLoadRuntime.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="GeoUtility.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="GeoCrs.cpp">
@@ -33,6 +36,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="DelayLoadRuntime.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="GeoUtility.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

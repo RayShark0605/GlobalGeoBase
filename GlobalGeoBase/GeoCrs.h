@@ -50,9 +50,19 @@ public:
     /**
      * @brief 构造一个空坐标系。
      *
-     * 空坐标系 IsValid() 返回 false，可通过 SetFromUserInput()、SetFromEpsg() 等接口赋值。
+     * 空坐标系 IsValid() 返回 false，可通过 SetFromUserInput() 等接口赋值。
      */
     GeoCrs();
+
+    /**
+     * @brief 根据用户输入构造坐标系。
+     * @param userInput 用户输入字符串，UTF-8 编码；语义与 SetFromUserInput() 完全相同。
+     * @param allowFileAccess 是否允许 GDAL 把输入解析为 .prj 等文件路径。
+     * @param allowNetworkAccess 是否允许 GDAL/PROJ 在解析过程中访问网络资源。
+     *
+     * 解析失败时构造为空坐标系，IsValid() 返回 false。
+     */
+    explicit GeoCrs(const std::string& userInput, bool allowFileAccess = true, bool allowNetworkAccess = true);
 
     /**
      * @brief 根据 GDAL OGRSpatialReference 构造坐标系。
@@ -83,18 +93,18 @@ public:
      * @brief 移动构造函数。
      * @param other 待移动的坐标系对象。
      *
-     * 移动后，other 会被重置为一个有效但为空的 GeoCrs 对象。
+     * 移动后源对象会被重置为空坐标系。
      */
-    GeoCrs(GeoCrs&& other) noexcept;
+    GeoCrs(GeoCrs&& other);
 
     /**
      * @brief 移动赋值运算符。
      * @param other 待移动的坐标系对象。
      * @return 当前对象引用。
      *
-     * 移动后，other 会被重置为一个有效但为空的 GeoCrs 对象。
+     * 移动后源对象会被重置为空坐标系。
      */
-    GeoCrs& operator=(GeoCrs&& other) noexcept;
+    GeoCrs& operator=(GeoCrs&& other);
 
     /**
      * @brief 析构函数。
@@ -115,11 +125,10 @@ public:
      * - ESRI:xxxx、IGNF:xxxx 等 PROJ 数据库中的 authority:code；
      * - urn:ogc:def:crs:EPSG::4490；
      * - WKT / PROJ.4 / PROJJSON；
-     * - 当 allowFileAccess 为 true 时，也允许输入 .prj 等文件路径。
-     *
-     * @note 默认关闭文件访问和网络访问，避免把普通字符串误解释为路径或触发外部访问。
+     * - 当 allowFileAccess 为 true 时，也允许输入 .prj 等文件路径；
+     * - 当 allowNetworkAccess 为 true 时，也允许输入 http:// 或 https:// CRS 定义地址。
      */
-    static GeoCrs FromUserInput(const std::string& userInput, bool allowFileAccess = false, bool allowNetworkAccess = false);
+    static GeoCrs FromUserInput(const std::string& userInput, bool allowFileAccess = true, bool allowNetworkAccess = true);
 
     /**
      * @brief 尝试从用户输入构造坐标系。
@@ -129,7 +138,7 @@ public:
      * @param allowNetworkAccess 是否允许 GDAL/PROJ 在解析过程中访问网络资源。
      * @return 构造成功返回 true；失败返回 false，并把 crs 重置为空坐标系。
      */
-    static bool TryFromUserInput(const std::string& userInput, GeoCrs* crs, bool allowFileAccess = false, bool allowNetworkAccess = false);
+    static bool TryFromUserInput(const std::string& userInput, GeoCrs* crs, bool allowFileAccess = true, bool allowNetworkAccess = true);
 
     /**
      * @brief 使用用户输入重设当前坐标系。
@@ -138,54 +147,7 @@ public:
      * @param allowNetworkAccess 是否允许 GDAL/PROJ 在解析过程中访问网络资源。
      * @return 设置成功返回 true；失败返回 false，并把当前对象重置为空坐标系。
      */
-    bool SetFromUserInput(const std::string& userInput, bool allowFileAccess = false, bool allowNetworkAccess = false);
-
-    /**
-     * @brief 根据 EPSG 代码构造坐标系。
-     * @param epsgCode EPSG 数值代码，例如 4326、4490、3857。
-     * @return 构造得到的坐标系；失败时返回空坐标系。
-     */
-    static GeoCrs FromEpsg(int epsgCode);
-
-    /**
-     * @brief 尝试根据 EPSG 代码构造坐标系。
-     * @param epsgCode EPSG 数值代码，例如 4326、4490、3857。
-     * @param crs 输出坐标系对象指针，不允许为 nullptr。
-     * @return 构造成功返回 true；失败返回 false，并把 crs 重置为空坐标系。
-     */
-    static bool TryFromEpsg(int epsgCode, GeoCrs* crs);
-
-    /**
-     * @brief 使用 EPSG 代码重设当前坐标系。
-     * @param epsgCode EPSG 数值代码，例如 4326、4490、3857。
-     * @return 设置成功返回 true；失败返回 false，并把当前对象重置为空坐标系。
-     */
-    bool SetFromEpsg(int epsgCode);
-
-    /**
-     * @brief 根据 authority 名称和代码构造坐标系。
-     * @param authorityName authority 名称，例如 EPSG、ESRI、IGNF，UTF-8 编码。
-     * @param authorityCode authority 代码，例如 4326、102100，UTF-8 编码。
-     * @return 构造得到的坐标系；失败时返回空坐标系。
-     */
-    static GeoCrs FromAuthorityCode(const std::string& authorityName, const std::string& authorityCode);
-
-    /**
-     * @brief 尝试根据 authority 名称和代码构造坐标系。
-     * @param authorityName authority 名称，例如 EPSG、ESRI、IGNF，UTF-8 编码。
-     * @param authorityCode authority 代码，例如 4326、102100，UTF-8 编码。
-     * @param crs 输出坐标系对象指针，不允许为 nullptr。
-     * @return 构造成功返回 true；失败返回 false，并把 crs 重置为空坐标系。
-     */
-    static bool TryFromAuthorityCode(const std::string& authorityName, const std::string& authorityCode, GeoCrs* crs);
-
-    /**
-     * @brief 使用 authority 名称和代码重设当前坐标系。
-     * @param authorityName authority 名称，例如 EPSG、ESRI、IGNF，UTF-8 编码。
-     * @param authorityCode authority 代码，例如 4326、102100，UTF-8 编码。
-     * @return 设置成功返回 true；失败返回 false，并把当前对象重置为空坐标系。
-     */
-    bool SetFromAuthorityCode(const std::string& authorityName, const std::string& authorityCode);
+    bool SetFromUserInput(const std::string& userInput, bool allowFileAccess = true, bool allowNetworkAccess = true);
 
     /**
      * @brief 使用 GDAL OGRSpatialReference 重设当前坐标系。
@@ -214,18 +176,21 @@ public:
     explicit operator bool() const;
 
     /**
-     * @brief 获取规范化唯一标识符。
-     * @return 唯一标识符字符串，UTF-8 编码；空坐标系返回空字符串。
+     * @brief 获取规范化标识符。
+     * @return 标识符字符串，UTF-8 编码；空坐标系返回空字符串。
      *
-     * 优先返回 authority 标识（如 AUTHORITY:EPSG:4326），无法识别 authority 时退化为紧凑 WKT2_2019。
-     * operator==、operator!=、IsSame() 均基于该标识符实现。
+     * 优先返回 authority 标识（如 AUTHORITY:EPSG:4326），无法识别 authority 时退化为 OGC URN、WKT2_2019、PROJJSON 或 PROJ.4。
+     *
+     * @note 该字符串适合做缓存键或日志输出；CRS 等价判断请使用 IsSame()，不要直接比较该字符串。
      */
     std::string GetUniqueId() const;
 
     /**
      * @brief 判断两个坐标系是否等价。
      * @param other 待比较的另一个坐标系对象。
-     * @return 二者唯一标识符相同返回 true，否则返回 false。
+     * @return 二者均有效且 GDAL 判定为等价 CRS 时返回 true，否则返回 false。
+     *
+     * 比较时忽略 data axis mapping 的差异，并允许地理 CRS 的轴顺序差异；GeoCrs 对外统一使用传统 GIS 坐标顺序。
      */
     bool IsSame(const GeoCrs& other) const;
 
@@ -288,26 +253,18 @@ public:
     /**
      * @brief 判断是否为自定义坐标系。
      * @return 无可识别 authority 且无法匹配到标准 authority 时返回 true，否则返回 false。
-     *
-     * 若坐标系没有可识别的顶层 authority，也无法通过 GDAL/PROJ 数据库匹配到 EPSG/ESRI 等 authority，
-     * 则视为自定义坐标系。
      */
     bool IsCustom() const;
 
     /**
      * @brief 是否按“经度、纬度”作为对外地理坐标输入/输出顺序。
      * @return 地理坐标系且使用传统 GIS 顺序时返回 true；投影坐标系或空坐标系返回 false。
-     *
-     * GeoCrs 内部统一设置为传统 GIS 顺序，所以地理坐标系通常返回 true。
-     * 对投影坐标系该问题不适用，返回 false。
      */
     bool IsLongitudeLatitudeOrder() const;
 
     /**
      * @brief 是否使用传统 GIS 坐标顺序。
      * @return 当前坐标系有效且 GDAL 轴映射策略为 OAMS_TRADITIONAL_GIS_ORDER 时返回 true。
-     *
-     * 地理坐标系为经度/纬度，投影坐标系为东向/北向。
      */
     bool UsesTraditionalGisOrder() const;
 
@@ -335,7 +292,7 @@ public:
     /**
      * @brief 导出为 PROJJSON 字符串。
      * @param multiline 是否输出多行格式化 JSON；false 时输出紧凑 JSON。
-     * @return PROJJSON 字符串，UTF-8 编码；失败或空坐标系返回空字符串。
+     * @return PROJJSON 字符串，UTF-8 编码；失败、不支持或空坐标系返回空字符串。
      */
     std::string ExportToProjJson(bool multiline = false) const;
 
@@ -347,7 +304,7 @@ public:
 
     /**
      * @brief 尝试获取 OGC URN 字符串。
-     * @return 例如 urn:ogc:def:crs:EPSG::4326；失败返回空字符串。
+     * @return 例如 urn:ogc:def:crs:EPSG::4326；失败或 GDAL 版本不支持时返回空字符串。
      */
     std::string GetOgcUrn() const;
 
@@ -400,7 +357,7 @@ public:
 
     /**
      * @brief 获取坐标历元。
-     * @return 坐标历元；未定义时通常返回 0。
+     * @return 坐标历元；未定义、不支持或无法获取时返回 0。
      */
     double GetCoordinateEpoch() const;
 
@@ -424,8 +381,6 @@ public:
      * @param rectangles 输出经纬度范围矩形数组指针，不允许为 nullptr。
      * @param areaName 可选输出范围名称指针，允许为 nullptr。
      * @return 成功获取至少一个范围矩形返回 true；失败返回 false。
-     *
-     * 输出矩形坐标序恒为 minX/minY/maxX/maxY = 西经度/南纬度/东经度/北纬度。
      */
     bool TryGetGeographicAreaOfUse(std::vector<GB_Rectangle>* rectangles, std::string* areaName = nullptr) const;
 
@@ -434,7 +389,7 @@ public:
      * @return 内部 OGRSpatialReference 只读引用。
      *
      * 返回对象归 GeoCrs 持有，调用方不得保存超过 GeoCrs 生命周期的引用，也不得通过 const_cast 修改。
-     * 若需要长期保存或跨模块修改，请使用 CopyToOgrSpatialReference()。
+     * 该接口只适合立即读取；若需要长期保存、跨线程传递或跨模块修改，请使用 CopyToOgrSpatialReference()。
      */
     const OGRSpatialReference& GetOgrSpatialReference() const;
 

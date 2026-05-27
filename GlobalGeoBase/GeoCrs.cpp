@@ -1,13 +1,14 @@
 ﻿#include "GeoCrs.h"
 
 #include "DelayLoadRuntime.h"
-#include "GB_Math.h"
 #include "GB_ReadWriteLock.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 #include <cpl_conv.h>
 #include <cpl_string.h>
@@ -24,13 +25,13 @@ namespace
     std::string TrimAscii(const std::string& text)
     {
         std::size_t beginIndex = 0;
-        while (beginIndex < text.size() && std::isspace(static_cast<unsigned char>(text[beginIndex])))
+        while (beginIndex < text.size() && std::isspace(static_cast<unsigned char>(text[beginIndex])) != 0)
         {
             beginIndex++;
         }
 
         std::size_t endIndex = text.size();
-        while (endIndex > beginIndex && std::isspace(static_cast<unsigned char>(text[endIndex - 1])))
+        while (endIndex > beginIndex && std::isspace(static_cast<unsigned char>(text[endIndex - 1])) != 0)
         {
             endIndex--;
         }
@@ -46,6 +47,266 @@ namespace
             result[i] = static_cast<char>(std::toupper(static_cast<unsigned char>(result[i])));
         }
         return result;
+    }
+
+
+    bool StartsWithAsciiNoCase(const std::string& text, const char* prefix)
+    {
+        if (prefix == nullptr)
+        {
+            return false;
+        }
+
+        const std::size_t prefixLength = std::strlen(prefix);
+        if (text.size() < prefixLength)
+        {
+            return false;
+        }
+
+        for (std::size_t i = 0; i < prefixLength; i++)
+        {
+            const char leftChar = static_cast<char>(std::toupper(static_cast<unsigned char>(text[i])));
+            const char rightChar = static_cast<char>(std::toupper(static_cast<unsigned char>(prefix[i])));
+            if (leftChar != rightChar)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool EndsWithAsciiNoCase(const std::string& text, const char* suffix)
+    {
+        if (suffix == nullptr)
+        {
+            return false;
+        }
+
+        const std::size_t suffixLength = std::strlen(suffix);
+        if (text.size() < suffixLength)
+        {
+            return false;
+        }
+
+        const std::size_t beginIndex = text.size() - suffixLength;
+        for (std::size_t i = 0; i < suffixLength; i++)
+        {
+            const char leftChar = static_cast<char>(std::toupper(static_cast<unsigned char>(text[beginIndex + i])));
+            const char rightChar = static_cast<char>(std::toupper(static_cast<unsigned char>(suffix[i])));
+            if (leftChar != rightChar)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool IsWindowsAbsolutePath(const std::string& text)
+    {
+        if (text.size() < 3)
+        {
+            return false;
+        }
+
+        const unsigned char driveChar = static_cast<unsigned char>(text[0]);
+        const bool hasDriveLetter = std::isalpha(driveChar) != 0 && text[1] == ':';
+        return hasDriveLetter && (text[2] == '\\' || text[2] == '/');
+    }
+
+    bool IsLikelyNetworkInput(const std::string& text)
+    {
+        return StartsWithAsciiNoCase(text, "http://") || StartsWithAsciiNoCase(text, "https://") || StartsWithAsciiNoCase(text, "/vsicurl/") || StartsWithAsciiNoCase(text, "/vsis3/") || StartsWithAsciiNoCase(text, "/vsigs/") || StartsWithAsciiNoCase(text, "/vsiaz/") || StartsWithAsciiNoCase(text, "/vsioss/") || StartsWithAsciiNoCase(text, "/vsiswift/");
+    }
+
+    bool IsLikelyFileInput(const std::string& text)
+    {
+        if (text.empty())
+        {
+            return false;
+        }
+
+        if (IsLikelyNetworkInput(text) || StartsWithAsciiNoCase(text, "/vsi") || StartsWithAsciiNoCase(text, "\\\\") || IsWindowsAbsolutePath(text) || StartsWithAsciiNoCase(text, "./") || StartsWithAsciiNoCase(text, ".\\") || StartsWithAsciiNoCase(text, "../") || StartsWithAsciiNoCase(text, "..\\"))
+        {
+            return true;
+        }
+
+        if (text.find('\\') != std::string::npos)
+        {
+            return true;
+        }
+
+        if (EndsWithAsciiNoCase(text, ".prj") || EndsWithAsciiNoCase(text, ".wkt") || EndsWithAsciiNoCase(text, ".xml") || EndsWithAsciiNoCase(text, ".projjson") || EndsWithAsciiNoCase(text, ".json"))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    bool ContainsAsciiNoCase(const std::string& text, const char* pattern)
+    {
+        if (pattern == nullptr || pattern[0] == '\0')
+        {
+            return false;
+        }
+
+        return ToUpperAscii(text).find(ToUpperAscii(pattern)) != std::string::npos;
+    }
+
+    std::string GetLeadingIdentifierUpper(const std::string& text)
+    {
+        std::size_t beginIndex = 0;
+        while (beginIndex < text.size() && std::isspace(static_cast<unsigned char>(text[beginIndex])) != 0)
+        {
+            beginIndex++;
+        }
+
+        std::size_t endIndex = beginIndex;
+        while (endIndex < text.size())
+        {
+            const unsigned char currentChar = static_cast<unsigned char>(text[endIndex]);
+            if (std::isalnum(currentChar) == 0 && currentChar != '_')
+            {
+                break;
+            }
+            endIndex++;
+        }
+
+        if (endIndex == beginIndex)
+        {
+            return std::string();
+        }
+
+        return ToUpperAscii(text.substr(beginIndex, endIndex - beginIndex));
+    }
+
+    bool IsLikelyWktInput(const std::string& text)
+    {
+        const std::string identifier = GetLeadingIdentifierUpper(text);
+        if (identifier.empty())
+        {
+            return false;
+        }
+
+        static const char* const wktIdentifiers[] =
+        {
+            "GEOGCS", "GEOCCS", "PROJCS", "VERT_CS", "LOCAL_CS", "COMPD_CS",
+            "GEODCRS", "GEOGCRS", "GEODETICCRS", "GEOCENTRICCRS", "PROJCRS", "PROJECTEDCRS", "VERTCRS", "VERTICALCRS",
+            "COMPOUNDCRS", "BOUNDCRS", "ENGCRS", "ENGINEERINGCRS", "DERIVEDPROJCRS", "DERIVEDGEOGCRS", "DERIVEDVERTCRS",
+            "PARAMETRICCRS", "TIMECRS", "ENSEMBLE", "DATUM", "ELLIPSOID", nullptr
+        };
+
+        for (std::size_t i = 0; wktIdentifiers[i] != nullptr; i++)
+        {
+            if (identifier == wktIdentifiers[i])
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    bool IsLikelyProj4Input(const std::string& text)
+    {
+        const std::string trimmedText = TrimAscii(text);
+        return StartsWithAsciiNoCase(trimmedText, "+proj=") || StartsWithAsciiNoCase(trimmedText, "+init=") || StartsWithAsciiNoCase(trimmedText, "+type=crs") || ContainsAsciiNoCase(trimmedText, " +proj=") || ContainsAsciiNoCase(trimmedText, "\t+proj=");
+    }
+
+    bool IsLikelyProjJsonInput(const std::string& text)
+    {
+        const std::string trimmedText = TrimAscii(text);
+        return !trimmedText.empty() && trimmedText[0] == '{';
+    }
+
+    bool IsLikelyAuthorityInput(const std::string& text)
+    {
+        const std::string trimmedText = TrimAscii(text);
+        if (StartsWithAsciiNoCase(trimmedText, "urn:ogc:def:crs:"))
+        {
+            return true;
+        }
+
+        const std::size_t colonIndex = trimmedText.find(':');
+        if (colonIndex == std::string::npos || colonIndex == 0)
+        {
+            return false;
+        }
+
+        if (trimmedText.find('/') != std::string::npos && trimmedText.find('/') < colonIndex)
+        {
+            return false;
+        }
+        if (trimmedText.find('\\') != std::string::npos && trimmedText.find('\\') < colonIndex)
+        {
+            return false;
+        }
+
+        const std::string authorityName = ToUpperAscii(trimmedText.substr(0, colonIndex));
+        static const char* const knownAuthorities[] =
+        {
+            "EPSG", "EPSGA", "ESRI", "IGNF", "OGC", "AUTO", "AUTO2", "CRS", "IAU_2015", nullptr
+        };
+
+        for (std::size_t i = 0; knownAuthorities[i] != nullptr; i++)
+        {
+            if (authorityName == knownAuthorities[i])
+            {
+                return true;
+            }
+        }
+
+        if (authorityName.size() < 2 || authorityName.size() > 32)
+        {
+            return false;
+        }
+
+        for (std::size_t i = 0; i < authorityName.size(); i++)
+        {
+            const unsigned char currentChar = static_cast<unsigned char>(authorityName[i]);
+            if (std::isalnum(currentChar) == 0 && currentChar != '_')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    bool IsLikelyWellKnownCrsNameInput(const std::string& text)
+    {
+        std::string normalizedText = ToUpperAscii(TrimAscii(text));
+        normalizedText.erase(std::remove(normalizedText.begin(), normalizedText.end(), ' '), normalizedText.end());
+        normalizedText.erase(std::remove(normalizedText.begin(), normalizedText.end(), '_'), normalizedText.end());
+        normalizedText.erase(std::remove(normalizedText.begin(), normalizedText.end(), '-'), normalizedText.end());
+
+        return normalizedText == "WGS84" || normalizedText == "WGS72" || normalizedText == "NAD27" || normalizedText == "NAD83" || normalizedText == "CRS84";
+    }
+
+    bool IsSafeNonFileUserInput(const std::string& text)
+    {
+        return IsLikelyWktInput(text) || IsLikelyProj4Input(text) || IsLikelyProjJsonInput(text) || IsLikelyAuthorityInput(text) || IsLikelyWellKnownCrsNameInput(text);
+    }
+
+    bool IsRejectedByAccessPolicy(const std::string& text, bool allowFileAccess, bool allowNetworkAccess)
+    {
+        if (!allowNetworkAccess && IsLikelyNetworkInput(text))
+        {
+            return true;
+        }
+
+#if GDAL_VERSION_NUM < 3090000
+        if (!allowFileAccess && !(allowNetworkAccess && IsLikelyNetworkInput(text)) && !IsSafeNonFileUserInput(text))
+        {
+            return true;
+        }
+#else
+        (void)allowFileAccess;
+#endif
+
+        return false;
     }
 
     bool IsFinite(double value)
@@ -123,16 +384,17 @@ namespace
         const char* multilineOption = multiline ? "MULTILINE=YES" : "MULTILINE=NO";
         const char* options[] = { format, multilineOption, nullptr };
         char* wkt = nullptr;
-        if (spatialReference.exportToWkt(&wkt, options) != OGRERR_NONE || wkt == nullptr)
+        const OGRErr errorCode = spatialReference.exportToWkt(&wkt, options);
+        if (errorCode != OGRERR_NONE || wkt == nullptr)
         {
-            if (wkt)
+            if (wkt != nullptr)
             {
                 CPLFree(wkt);
             }
             return std::string();
         }
 
-        std::string result(wkt);
+        const std::string result(wkt);
         CPLFree(wkt);
         return result;
     }
@@ -145,16 +407,17 @@ namespace
         }
 
         char* wkt = nullptr;
-        if (spatialReference.exportToPrettyWkt(&wkt, simplify ? TRUE : FALSE) != OGRERR_NONE || wkt == nullptr)
+        const OGRErr errorCode = spatialReference.exportToPrettyWkt(&wkt, simplify ? TRUE : FALSE);
+        if (errorCode != OGRERR_NONE || wkt == nullptr)
         {
-            if (wkt)
+            if (wkt != nullptr)
             {
                 CPLFree(wkt);
             }
             return std::string();
         }
 
-        std::string result(wkt);
+        const std::string result(wkt);
         CPLFree(wkt);
         return result;
     }
@@ -167,22 +430,24 @@ namespace
         }
 
         char* proj4 = nullptr;
-        if (spatialReference.exportToProj4(&proj4) != OGRERR_NONE || proj4 == nullptr)
+        const OGRErr errorCode = spatialReference.exportToProj4(&proj4);
+        if (errorCode != OGRERR_NONE || proj4 == nullptr)
         {
-            if (proj4)
+            if (proj4 != nullptr)
             {
                 CPLFree(proj4);
             }
             return std::string();
         }
 
-        std::string result(proj4);
+        const std::string result(proj4);
         CPLFree(proj4);
         return result;
     }
 
     std::string ExportProjJsonNoLock(const OGRSpatialReference& spatialReference, bool multiline)
     {
+#if GDAL_VERSION_NUM >= 3010000
         if (spatialReference.IsEmpty())
         {
             return std::string();
@@ -191,18 +456,24 @@ namespace
         const char* multilineOption = multiline ? "MULTILINE=YES" : "MULTILINE=NO";
         const char* options[] = { multilineOption, nullptr };
         char* projJson = nullptr;
-        if (spatialReference.exportToPROJJSON(&projJson, options) != OGRERR_NONE || projJson == nullptr)
+        const OGRErr errorCode = spatialReference.exportToPROJJSON(&projJson, options);
+        if (errorCode != OGRERR_NONE || projJson == nullptr)
         {
-            if (projJson)
+            if (projJson != nullptr)
             {
                 CPLFree(projJson);
             }
             return std::string();
         }
 
-        std::string result(projJson);
+        const std::string result(projJson);
         CPLFree(projJson);
         return result;
+#else
+        (void)spatialReference;
+        (void)multiline;
+        return std::string();
+#endif
     }
 
     std::string ExportOgcUrnNoLock(const OGRSpatialReference& spatialReference)
@@ -219,7 +490,7 @@ namespace
             return std::string();
         }
 
-        std::string result(urn);
+        const std::string result(urn);
         CPLFree(urn);
         return result;
 #else
@@ -232,7 +503,7 @@ namespace
     {
         const char* authorityName = spatialReference.GetAuthorityName(nullptr);
         const char* authorityCode = spatialReference.GetAuthorityCode(nullptr);
-        if (authorityName == nullptr || authorityCode == nullptr)
+        if (authorityName == nullptr || authorityName[0] == '\0' || authorityCode == nullptr || authorityCode[0] == '\0')
         {
             return std::string();
         }
@@ -248,7 +519,12 @@ namespace
 
     bool IsSameSpatialReferenceNoLock(const OGRSpatialReference& left, const OGRSpatialReference& right)
     {
-        const char* options[] = { "IGNORE_DATA_AXIS_TO_SRS_AXIS_MAPPING=YES", "CRITERION=EQUIVALENT", nullptr };
+        if (left.IsEmpty() || right.IsEmpty())
+        {
+            return false;
+        }
+
+        const char* options[] = { "IGNORE_DATA_AXIS_TO_SRS_AXIS_MAPPING=YES", "CRITERION=EQUIVALENT_EXCEPT_AXIS_ORDER_GEOGCRS", nullptr };
         return left.IsSame(&right, options) != FALSE;
     }
 
@@ -259,14 +535,18 @@ namespace
             return std::string();
         }
 
-        OGRSpatialReference candidate;
-        AssignSpatialReference(candidate, spatialReference);
-        if (candidate.AutoIdentifyEPSG() == OGRERR_NONE)
+        const std::string preferredAuthorityUpper = ToUpperAscii(ToString(preferredAuthority));
+        if (preferredAuthorityUpper.empty() || preferredAuthorityUpper == "EPSG")
         {
-            const std::string authorityString = GetRootAuthorityStringNoLock(candidate, onlyEpsgOrEsri);
-            if (!authorityString.empty())
+            OGRSpatialReference candidate;
+            AssignSpatialReference(candidate, spatialReference);
+            if (candidate.AutoIdentifyEPSG() == OGRERR_NONE)
             {
-                return authorityString;
+                const std::string authorityString = GetRootAuthorityStringNoLock(candidate, onlyEpsgOrEsri);
+                if (!authorityString.empty())
+                {
+                    return authorityString;
+                }
             }
         }
 
@@ -313,6 +593,47 @@ namespace
         return std::string();
     }
 
+    std::string MakeUniqueIdNoLock(const OGRSpatialReference& spatialReference)
+    {
+        if (spatialReference.IsEmpty())
+        {
+            return std::string();
+        }
+
+        const std::string authorityString = GetAuthorityStringNoLock(spatialReference, false);
+        if (!authorityString.empty())
+        {
+            return "AUTHORITY:" + authorityString;
+        }
+
+        const std::string ogcUrn = ExportOgcUrnNoLock(spatialReference);
+        if (!ogcUrn.empty())
+        {
+            return "URN:" + ogcUrn;
+        }
+
+        const std::string wkt = ExportWktNoLock(spatialReference, "FORMAT=WKT2_2019", false);
+        if (!wkt.empty())
+        {
+            return "WKT2_2019:" + wkt;
+        }
+
+        const std::string projJson = ExportProjJsonNoLock(spatialReference, false);
+        if (!projJson.empty())
+        {
+            return "PROJJSON:" + projJson;
+        }
+
+        const std::string proj4 = ExportProj4NoLock(spatialReference);
+        if (!proj4.empty())
+        {
+            return "PROJ4:" + proj4;
+        }
+
+        const std::string name = ToString(spatialReference.GetName());
+        return name.empty() ? std::string() : "NAME:" + name;
+    }
+
     std::vector<GB_Rectangle> SplitAreaOfUse(double westLongitude, double southLatitude, double eastLongitude, double northLatitude)
     {
         std::vector<GB_Rectangle> rectangles;
@@ -349,6 +670,12 @@ namespace
     {
         GeoCrs::UnitInfo result;
         if (spatialReference.IsEmpty())
+        {
+            return result;
+        }
+
+        const bool hasLinearCoordinateAxis = spatialReference.IsProjected() != FALSE || spatialReference.IsLocal() != FALSE || spatialReference.IsVertical() != FALSE || spatialReference.IsGeocentric() != FALSE || spatialReference.IsCompound() != FALSE;
+        if (!hasLinearCoordinateAxis)
         {
             return result;
         }
@@ -390,6 +717,15 @@ namespace
 
 struct GeoCrs::Impl
 {
+    struct RuntimeInitializer
+    {
+        RuntimeInitializer()
+        {
+            InitializeRuntime();
+        }
+    };
+
+    RuntimeInitializer runtimeInitializer;
     OGRSpatialReference spatialReference;
     mutable GB_ReadWriteLock cacheLock;
 
@@ -543,13 +879,17 @@ struct GeoCrs::Impl
 GeoCrs::GeoCrs()
     : impl_(new Impl())
 {
-    InitializeRuntime();
+}
+
+GeoCrs::GeoCrs(const std::string& userInput, bool allowFileAccess, bool allowNetworkAccess)
+    : impl_(new Impl())
+{
+    SetFromUserInput(userInput, allowFileAccess, allowNetworkAccess);
 }
 
 GeoCrs::GeoCrs(const OGRSpatialReference& spatialReference)
     : impl_(new Impl())
 {
-    InitializeRuntime();
     SetFromOgrSpatialReference(spatialReference);
 }
 
@@ -579,21 +919,22 @@ GeoCrs& GeoCrs::operator=(const GeoCrs& other)
     return *this;
 }
 
-GeoCrs::GeoCrs(GeoCrs&& other) noexcept
-    : impl_(std::move(other.impl_))
+GeoCrs::GeoCrs(GeoCrs&& other)
+    : impl_(new Impl())
 {
-    other.impl_.reset(new Impl());
+    impl_.swap(other.impl_);
 }
 
-GeoCrs& GeoCrs::operator=(GeoCrs&& other) noexcept
+GeoCrs& GeoCrs::operator=(GeoCrs&& other)
 {
     if (this == &other)
     {
         return *this;
     }
 
+    std::unique_ptr<Impl> emptyImpl(new Impl());
     impl_ = std::move(other.impl_);
-    other.impl_.reset(new Impl());
+    other.impl_ = std::move(emptyImpl);
     return *this;
 }
 
@@ -601,9 +942,7 @@ GeoCrs::~GeoCrs() = default;
 
 GeoCrs GeoCrs::FromUserInput(const std::string& userInput, bool allowFileAccess, bool allowNetworkAccess)
 {
-    GeoCrs crs;
-    crs.SetFromUserInput(userInput, allowFileAccess, allowNetworkAccess);
-    return crs;
+    return GeoCrs(userInput, allowFileAccess, allowNetworkAccess);
 }
 
 bool GeoCrs::TryFromUserInput(const std::string& userInput, GeoCrs* crs, bool allowFileAccess, bool allowNetworkAccess)
@@ -639,6 +978,12 @@ bool GeoCrs::SetFromUserInput(const std::string& userInput, bool allowFileAccess
         return false;
     }
 
+    if (IsRejectedByAccessPolicy(trimmedUserInput, allowFileAccess, allowNetworkAccess))
+    {
+        Reset();
+        return false;
+    }
+
     OGRSpatialReference newSpatialReference;
 #if GDAL_VERSION_NUM >= 3090000
     char** options = nullptr;
@@ -647,8 +992,6 @@ bool GeoCrs::SetFromUserInput(const std::string& userInput, bool allowFileAccess
     const OGRErr errorCode = newSpatialReference.SetFromUserInput(trimmedUserInput.c_str(), options);
     CSLDestroy(options);
 #else
-    (void)allowFileAccess;
-    (void)allowNetworkAccess;
     const OGRErr errorCode = newSpatialReference.SetFromUserInput(trimmedUserInput.c_str());
 #endif
     if (errorCode != OGRERR_NONE || newSpatialReference.IsEmpty())
@@ -658,101 +1001,11 @@ bool GeoCrs::SetFromUserInput(const std::string& userInput, bool allowFileAccess
     }
 
     SetTraditionalGisOrder(newSpatialReference);
-    return SetFromOgrSpatialReference(newSpatialReference);
-}
 
-GeoCrs GeoCrs::FromEpsg(int epsgCode)
-{
-    GeoCrs crs;
-    crs.SetFromEpsg(epsgCode);
-    return crs;
-}
-
-bool GeoCrs::TryFromEpsg(int epsgCode, GeoCrs* crs)
-{
-    if (crs == nullptr)
-    {
-        return false;
-    }
-
-    GeoCrs newCrs;
-    if (!newCrs.SetFromEpsg(epsgCode))
-    {
-        crs->Reset();
-        return false;
-    }
-
-    *crs = std::move(newCrs);
+    GB_WriteLockGuard writeGuard(impl_->cacheLock);
+    AssignSpatialReference(impl_->spatialReference, newSpatialReference);
+    impl_->ClearCachesUnlocked();
     return true;
-}
-
-bool GeoCrs::SetFromEpsg(int epsgCode)
-{
-    if (!InitializeRuntime())
-    {
-        Reset();
-        return false;
-    }
-
-    if (epsgCode <= 0)
-    {
-        Reset();
-        return false;
-    }
-
-    OGRSpatialReference newSpatialReference;
-    if (newSpatialReference.importFromEPSG(epsgCode) != OGRERR_NONE || newSpatialReference.IsEmpty())
-    {
-        Reset();
-        return false;
-    }
-
-    SetTraditionalGisOrder(newSpatialReference);
-    return SetFromOgrSpatialReference(newSpatialReference);
-}
-
-GeoCrs GeoCrs::FromAuthorityCode(const std::string& authorityName, const std::string& authorityCode)
-{
-    GeoCrs crs;
-    crs.SetFromAuthorityCode(authorityName, authorityCode);
-    return crs;
-}
-
-bool GeoCrs::TryFromAuthorityCode(const std::string& authorityName, const std::string& authorityCode, GeoCrs* crs)
-{
-    if (crs == nullptr)
-    {
-        return false;
-    }
-
-    GeoCrs newCrs;
-    if (!newCrs.SetFromAuthorityCode(authorityName, authorityCode))
-    {
-        crs->Reset();
-        return false;
-    }
-
-    *crs = std::move(newCrs);
-    return true;
-}
-
-bool GeoCrs::SetFromAuthorityCode(const std::string& authorityName, const std::string& authorityCode)
-{
-    if (!InitializeRuntime())
-    {
-        Reset();
-        return false;
-    }
-
-    const std::string trimmedAuthorityName = TrimAscii(authorityName);
-    const std::string trimmedAuthorityCode = TrimAscii(authorityCode);
-    if (trimmedAuthorityName.empty() || trimmedAuthorityCode.empty())
-    {
-        Reset();
-        return false;
-    }
-
-    return SetFromUserInput(trimmedAuthorityName + ":" + trimmedAuthorityCode);
 }
 
 bool GeoCrs::SetFromOgrSpatialReference(const OGRSpatialReference& spatialReference)
@@ -809,30 +1062,7 @@ std::string GeoCrs::GetUniqueId() const
     GB_WriteLockGuard writeGuard(impl_->cacheLock);
     if (!impl_->uniqueIdCached)
     {
-        if (impl_->spatialReference.IsEmpty())
-        {
-            impl_->uniqueId.clear();
-        }
-        else
-        {
-            const std::string authorityString = GetAuthorityStringNoLock(impl_->spatialReference, false);
-            if (!authorityString.empty())
-            {
-                impl_->uniqueId = "AUTHORITY:" + authorityString;
-            }
-            else
-            {
-                const std::string ogcUrn = ExportOgcUrnNoLock(impl_->spatialReference);
-                if (!ogcUrn.empty())
-                {
-                    impl_->uniqueId = "URN:" + ogcUrn;
-                }
-                else
-                {
-                    impl_->uniqueId = "WKT2_2019:" + ExportWktNoLock(impl_->spatialReference, "FORMAT=WKT2_2019", false);
-                }
-            }
-        }
+        impl_->uniqueId = MakeUniqueIdNoLock(impl_->spatialReference);
         impl_->uniqueIdCached = true;
     }
     return impl_->uniqueId;
@@ -840,7 +1070,24 @@ std::string GeoCrs::GetUniqueId() const
 
 bool GeoCrs::IsSame(const GeoCrs& other) const
 {
-    return GetUniqueId() == other.GetUniqueId();
+    if (this == &other)
+    {
+        return IsValid();
+    }
+
+    OGRSpatialReference leftSpatialReference;
+    if (!CopyToOgrSpatialReference(leftSpatialReference))
+    {
+        return false;
+    }
+
+    OGRSpatialReference rightSpatialReference;
+    if (!other.CopyToOgrSpatialReference(rightSpatialReference))
+    {
+        return false;
+    }
+
+    return IsSameSpatialReferenceNoLock(leftSpatialReference, rightSpatialReference);
 }
 
 bool GeoCrs::operator==(const GeoCrs& other) const
@@ -984,7 +1231,17 @@ bool GeoCrs::IsDynamic() const
     GB_WriteLockGuard writeGuard(impl_->cacheLock);
     if (!impl_->isDynamicCached)
     {
+#if GDAL_VERSION_NUM >= 3040000
         impl_->isDynamic = impl_->spatialReference.IsDynamic();
+#if GDAL_VERSION_NUM >= 3080000
+        if (!impl_->isDynamic)
+        {
+            impl_->isDynamic = impl_->spatialReference.HasPointMotionOperation();
+        }
+#endif
+#else
+        impl_->isDynamic = false;
+#endif
         impl_->isDynamicCached = true;
     }
     return impl_->isDynamic;
@@ -1003,7 +1260,7 @@ bool GeoCrs::IsCustom() const
     GB_WriteLockGuard writeGuard(impl_->cacheLock);
     if (!impl_->isCustomCached)
     {
-        impl_->isCustom = impl_->spatialReference.IsEmpty() || GetAuthorityStringNoLock(impl_->spatialReference, false).empty();
+        impl_->isCustom = !impl_->spatialReference.IsEmpty() && GetAuthorityStringNoLock(impl_->spatialReference, false).empty();
         impl_->isCustomCached = true;
     }
     return impl_->isCustom;
@@ -1253,12 +1510,14 @@ double GeoCrs::GetMetersPerUnit() const
         impl_->metersPerUnit = 0.0;
         if (!impl_->spatialReference.IsEmpty())
         {
-            if (impl_->spatialReference.IsProjected() != FALSE || impl_->spatialReference.IsLocal() != FALSE)
+            const bool shouldUseLinearUnits = impl_->spatialReference.IsProjected() != FALSE || impl_->spatialReference.IsLocal() != FALSE || impl_->spatialReference.IsCompound() != FALSE || impl_->spatialReference.IsVertical() != FALSE || impl_->spatialReference.IsGeocentric() != FALSE;
+            if (shouldUseLinearUnits)
             {
                 const UnitInfo linearUnits = MakeLinearUnitInfoNoLock(impl_->spatialReference);
                 impl_->metersPerUnit = linearUnits.isValid ? linearUnits.conversionFactor : 0.0;
             }
-            else if (impl_->spatialReference.IsGeographic() != FALSE)
+
+            if (impl_->metersPerUnit <= 0.0 && impl_->spatialReference.IsGeographic() != FALSE)
             {
                 const UnitInfo angularUnits = MakeAngularUnitInfoNoLock(impl_->spatialReference);
                 OGRErr errorCode = OGRERR_NONE;
@@ -1308,7 +1567,7 @@ double GeoCrs::GetSemiMajor() const
         impl_->semiMajor = 0.0;
         OGRErr errorCode = OGRERR_NONE;
         const double result = impl_->spatialReference.GetSemiMajor(&errorCode);
-        if (errorCode == OGRERR_NONE && IsFinite(result))
+        if (errorCode == OGRERR_NONE && IsFinite(result) && result > 0.0)
         {
             impl_->semiMajor = result;
         }
@@ -1333,7 +1592,7 @@ double GeoCrs::GetSemiMinor() const
         impl_->semiMinor = 0.0;
         OGRErr errorCode = OGRERR_NONE;
         const double result = impl_->spatialReference.GetSemiMinor(&errorCode);
-        if (errorCode == OGRERR_NONE && IsFinite(result))
+        if (errorCode == OGRERR_NONE && IsFinite(result) && result > 0.0)
         {
             impl_->semiMinor = result;
         }
@@ -1358,7 +1617,7 @@ double GeoCrs::GetInvFlattening() const
         impl_->invFlattening = 0.0;
         OGRErr errorCode = OGRERR_NONE;
         const double result = impl_->spatialReference.GetInvFlattening(&errorCode);
-        if (errorCode == OGRERR_NONE && IsFinite(result))
+        if (errorCode == OGRERR_NONE && IsFinite(result) && result > 0.0)
         {
             impl_->invFlattening = result;
         }
@@ -1380,7 +1639,12 @@ double GeoCrs::GetCoordinateEpoch() const
     GB_WriteLockGuard writeGuard(impl_->cacheLock);
     if (!impl_->coordinateEpochCached)
     {
-        impl_->coordinateEpoch = impl_->spatialReference.GetCoordinateEpoch();
+#if GDAL_VERSION_NUM >= 3040000
+        const double result = impl_->spatialReference.GetCoordinateEpoch();
+        impl_->coordinateEpoch = IsFinite(result) ? result : 0.0;
+#else
+        impl_->coordinateEpoch = 0.0;
+#endif
         impl_->coordinateEpochCached = true;
     }
     return impl_->coordinateEpoch;
@@ -1404,7 +1668,7 @@ std::vector<GB_Rectangle> GeoCrs::GetGeographicAreaOfUse() const
         double eastLongitude = 0.0;
         double northLatitude = 0.0;
         const char* areaName = nullptr;
-        if (impl_->spatialReference.GetAreaOfUse(&westLongitude, &southLatitude, &eastLongitude, &northLatitude, &areaName))
+        if (!impl_->spatialReference.IsEmpty() && impl_->spatialReference.GetAreaOfUse(&westLongitude, &southLatitude, &eastLongitude, &northLatitude, &areaName))
         {
             impl_->areaOfUse = SplitAreaOfUse(westLongitude, southLatitude, eastLongitude, northLatitude);
             impl_->areaOfUseName = ToString(areaName);
@@ -1452,7 +1716,7 @@ bool GeoCrs::CopyToOgrSpatialReference(OGRSpatialReference& spatialReference) co
     GB_ReadLockGuard readGuard(impl_->cacheLock);
     if (impl_->spatialReference.IsEmpty())
     {
-        spatialReference.Clear();
+        ClearSpatialReference(spatialReference);
         return false;
     }
 

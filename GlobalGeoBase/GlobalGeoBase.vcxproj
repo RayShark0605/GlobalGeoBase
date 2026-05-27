@@ -21,12 +21,14 @@
   <ItemGroup>
     <ClInclude Include="DelayLoadRuntime.h" />
     <ClInclude Include="GeoCrs.h" />
+    <ClInclude Include="GeoUtility.h" />
     <ClInclude Include="GlobalGeoBasePort.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DelayLoadRuntime.cpp" />
     <ClCompile Include="DllMain.cpp" />
     <ClCompile Include="GeoCrs.cpp" />
+    <ClCompile Include="GeoUtility.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>

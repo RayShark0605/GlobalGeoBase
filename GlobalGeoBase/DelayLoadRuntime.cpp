@@ -10,6 +10,7 @@
 #include <delayimp.h>
 
 #include <algorithm>
+#include <cctype>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -19,49 +20,45 @@
 
 namespace
 {
+    enum class ProjDataDirectorySource
+    {
+        NotSet,
+        Automatic,
+        Manual
+    };
+
     HMODULE globalBaseModuleHandle = nullptr;
 
+    std::once_flag runtimeDependencyInitOnce;
+    bool runtimeDependenciesSucceeded = false;
+    std::wstring runtimeDependencyFailureDllList;
+
     std::once_flag runtimeInitOnce;
-    bool runtimeInitialized = false;
-    bool runtimeInitializeSucceeded = false;
+
+    std::mutex projDataDirectoryMutex;
+    ProjDataDirectorySource projDataDirectorySource = ProjDataDirectorySource::NotSet;
+    std::string projDataDirectoryUtf8;
 
     LONG messageBoxShownFlag = 0;
 
     std::wstring GetGlobalBaseDirectory();
     std::wstring GetExecutableDirectory();
 
-    bool EqualsIgnoreCaseAscii(const char* leftText, const char* rightText)
+    std::string TrimAscii(const std::string& text)
     {
-        if (leftText == nullptr || rightText == nullptr)
+        std::size_t beginIndex = 0;
+        while (beginIndex < text.size() && std::isspace(static_cast<unsigned char>(text[beginIndex])) != 0)
         {
-            return false;
+            beginIndex++;
         }
 
-        while (*leftText != '\0' && *rightText != '\0')
+        std::size_t endIndex = text.size();
+        while (endIndex > beginIndex && std::isspace(static_cast<unsigned char>(text[endIndex - 1])) != 0)
         {
-            char leftChar = *leftText;
-            char rightChar = *rightText;
-
-            if (leftChar >= 'A' && leftChar <= 'Z')
-            {
-                leftChar = static_cast<char>(leftChar - 'A' + 'a');
-            }
-
-            if (rightChar >= 'A' && rightChar <= 'Z')
-            {
-                rightChar = static_cast<char>(rightChar - 'A' + 'a');
-            }
-
-            if (leftChar != rightChar)
-            {
-                return false;
-            }
-
-            leftText++;
-            rightText++;
+            endIndex--;
         }
 
-        return *leftText == '\0' && *rightText == '\0';
+        return text.substr(beginIndex, endIndex - beginIndex);
     }
 
     bool EqualsIgnoreCaseAscii(const wchar_t* leftText, const wchar_t* rightText)
@@ -154,9 +151,13 @@ namespace
             return L"";
         }
 
+        if (pos == 2 && filePath.size() >= 3 && filePath[1] == L':' && (filePath[2] == L'\\' || filePath[2] == L'/'))
+        {
+            return filePath.substr(0, 3);
+        }
+
         return filePath.substr(0, pos);
     }
-
 
     std::string WideToUtf8(const std::wstring& wideText)
     {
@@ -216,33 +217,6 @@ namespace
         directoryPaths.push_back(directoryPath);
     }
 
-
-    void AppendDllNamesFromDirectory(std::vector<std::wstring>& dllNames, const std::wstring& directoryPath)
-    {
-        if (!DirectoryExists(directoryPath))
-        {
-            return;
-        }
-
-        WIN32_FIND_DATAW findData = {};
-        const std::wstring searchPattern = JoinPath(directoryPath, L"*.dll");
-        HANDLE findHandle = FindFirstFileW(searchPattern.c_str(), &findData);
-        if (findHandle == INVALID_HANDLE_VALUE)
-        {
-            return;
-        }
-
-        do
-        {
-            if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
-            {
-                AppendUniqueDirectory(dllNames, findData.cFileName);
-            }
-        } while (FindNextFileW(findHandle, &findData) != FALSE);
-
-        FindClose(findHandle);
-    }
-
     const std::wstring& GetRuntimeDisplayName()
     {
 #ifdef _DEBUG
@@ -261,7 +235,7 @@ namespace
     const std::vector<std::wstring>& GetManagedDelayLoadDllNames()
     {
         // 这里只能维护 GlobalGeoBase 自己在链接器 /DELAYLOAD 中声明的 DLL。
-        // 否则会把 本模块依赖也提前加载，这些 DLL 的初始化逻辑和下级依赖通常只应由它们自己的宿主模块按需触发。
+        // 否则会把其它模块依赖也提前加载，这些 DLL 的初始化逻辑和下级依赖通常只应由它们自己的宿主模块按需触发。
 #ifdef _DEBUG
         static const std::vector<std::wstring> dllNames = { L"gdald.dll" };
 #else
@@ -297,7 +271,6 @@ namespace
             filePathBuffer.resize(filePathBuffer.size() * 2, L'\0');
         }
     }
-
 
     std::wstring GetExecutableDirectory()
     {
@@ -344,10 +317,37 @@ namespace
         return L"";
     }
 
+    bool IsProjDataDirectoryConfigured()
+    {
+        std::lock_guard<std::mutex> lockGuard(projDataDirectoryMutex);
+        return projDataDirectorySource != ProjDataDirectorySource::NotSet && !projDataDirectoryUtf8.empty();
+    }
+
+    void ApplyProjDataDirectoryUtf8(const std::string& directoryPathUtf8)
+    {
+        const char* projSearchPaths[] = { directoryPathUtf8.c_str(), nullptr };
+        OSRSetPROJSearchPaths(projSearchPaths);
+
+        CPLSetConfigOption("PROJ_DATA", directoryPathUtf8.c_str());
+        CPLSetConfigOption("PROJ_LIB", directoryPathUtf8.c_str());
+    }
+
     bool InitializeProjDataDirectory(std::wstring* failureReason)
     {
-        const std::wstring projDataDirectory = FindProjDataDirectory();
-        if (projDataDirectory.empty())
+        {
+            std::lock_guard<std::mutex> lockGuard(projDataDirectoryMutex);
+            if (projDataDirectorySource == ProjDataDirectorySource::Manual)
+            {
+                return true;
+            }
+            if (projDataDirectorySource == ProjDataDirectorySource::Automatic && !projDataDirectoryUtf8.empty())
+            {
+                return true;
+            }
+        }
+
+        const std::wstring foundProjDataDirectory = FindProjDataDirectory();
+        if (foundProjDataDirectory.empty())
         {
             if (failureReason != nullptr)
             {
@@ -356,8 +356,8 @@ namespace
             return false;
         }
 
-        const std::string projDataDirectoryUtf8 = WideToUtf8(projDataDirectory);
-        if (projDataDirectoryUtf8.empty())
+        const std::string foundProjDataDirectoryUtf8 = WideToUtf8(foundProjDataDirectory);
+        if (foundProjDataDirectoryUtf8.empty())
         {
             if (failureReason != nullptr)
             {
@@ -366,34 +366,16 @@ namespace
             return false;
         }
 
-        const char* projSearchPaths[] = { projDataDirectoryUtf8.c_str(), nullptr };
-        OSRSetPROJSearchPaths(projSearchPaths);
-
-        CPLSetConfigOption("PROJ_DATA", projDataDirectoryUtf8.c_str());
-        CPLSetConfigOption("PROJ_LIB", projDataDirectoryUtf8.c_str());
-
-        return true;
-    }
-
-    static std::wstring GetLastErrorMessage(DWORD errorCode)
-    {
-        LPWSTR buffer = nullptr;
-        const DWORD length = ::FormatMessageW(
-            FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-            nullptr,
-            errorCode,
-            0,
-            reinterpret_cast<LPWSTR>(&buffer),
-            0,
-            nullptr);
-
-        std::wstring message;
-        if (length > 0 && buffer != nullptr)
+        std::lock_guard<std::mutex> lockGuard(projDataDirectoryMutex);
+        if (projDataDirectorySource == ProjDataDirectorySource::Manual)
         {
-            message.assign(buffer, length);
-            ::LocalFree(buffer);
+            return true;
         }
-        return message;
+
+        ApplyProjDataDirectoryUtf8(foundProjDataDirectoryUtf8);
+        projDataDirectoryUtf8 = foundProjDataDirectoryUtf8;
+        projDataDirectorySource = ProjDataDirectorySource::Automatic;
+        return true;
     }
 
     bool IsManagedDelayLoadDll(const char* dllName)
@@ -504,26 +486,31 @@ namespace
         return true;
     }
 
+    void EnsureRuntimeDependenciesLoadedInternal()
+    {
+        std::call_once(runtimeDependencyInitOnce, []() {
+            runtimeDependenciesSucceeded = PreloadManagedDependencies(&runtimeDependencyFailureDllList);
+            });
+    }
+
     void EnsureRuntimeInitializedInternal()
     {
         std::call_once(runtimeInitOnce, []() {
-            runtimeInitialized = true;
+            EnsureRuntimeDependenciesLoadedInternal();
 
-            std::wstring failedDllList;
-            runtimeInitializeSucceeded = PreloadManagedDependencies(&failedDllList);
-
-            if (!runtimeInitializeSucceeded)
+            if (!runtimeDependenciesSucceeded)
             {
                 const std::wstring& runtimeDisplayName = GetRuntimeDisplayName();
 
                 std::wstring messageText =
                     runtimeDisplayName +
                     L" 无法加载以下关键运行时依赖：\r\n\r\n" +
-                    failedDllList +
+                    runtimeDependencyFailureDllList +
                     L"\r\n\r\n"
                     L"加载顺序已按以下规则尝试：\r\n"
                     L"1. GlobalBaseDependencies 子目录\r\n"
-                    L"2. 当前模块所在目录\r\n\r\n"
+                    L"2. 当前模块所在目录\r\n"
+                    L"3. 可执行程序所在目录下的同名相对目录\r\n\r\n"
                     L"请检查部署目录、位数是否一致，以及依赖 DLL 自身的下级依赖是否齐全。";
 
                 ShowMessageBoxOnce(messageText);
@@ -531,8 +518,7 @@ namespace
             }
 
             std::wstring projFailureReason;
-            runtimeInitializeSucceeded = InitializeProjDataDirectory(&projFailureReason);
-            if (!runtimeInitializeSucceeded)
+            if (!InitializeProjDataDirectory(&projFailureReason))
             {
                 const std::wstring& runtimeDisplayName = GetRuntimeDisplayName();
 
@@ -541,7 +527,7 @@ namespace
                     L" 无法初始化 PROJ 数据目录：\r\n\r\n" +
                     projFailureReason +
                     L"\r\n\r\n"
-                    L"请把包含 proj.db 的 PROJ 数据目录部署到以下任一位置：\r\n"
+                    L"请把包含 proj.db 的 PROJ 数据目录部署到以下任一位置，或调用 GeoUtility::SetGdalProjDataDirectory() 手动指定：\r\n"
                     L"1. 当前模块所在目录\\GlobalBaseDependencies\\share\\proj\r\n"
                     L"2. 当前模块所在目录\\GlobalBaseDependencies\\proj\r\n"
                     L"3. 当前模块所在目录\\share\\proj\r\n"
@@ -600,7 +586,8 @@ namespace
                 L"\r\n\r\n"
                 L"已尝试以下位置：\r\n"
                 L"1. GlobalBaseDependencies 子目录\r\n"
-                L"2. 当前模块所在目录";
+                L"2. 当前模块所在目录\r\n"
+                L"3. 可执行程序所在目录下的同名相对目录";
 
             ShowMessageBoxOnce(messageText);
             return nullptr;
@@ -648,5 +635,90 @@ void SetSelfModuleHandle(HMODULE moduleHandle)
 bool InitializeRuntime()
 {
     EnsureRuntimeInitializedInternal();
-    return runtimeInitializeSucceeded;
+    return runtimeDependenciesSucceeded && IsProjDataDirectoryConfigured();
+}
+
+bool SetRuntimeProjDataDirectoryFromUser(const std::string& projDataDirectoryPathUtf8, std::string* errorMessageUtf8)
+{
+    if (errorMessageUtf8 != nullptr)
+    {
+        errorMessageUtf8->clear();
+    }
+
+    const std::string trimmedProjDataDirectoryPathUtf8 = TrimAscii(projDataDirectoryPathUtf8);
+    if (trimmedProjDataDirectoryPathUtf8.empty())
+    {
+        if (errorMessageUtf8 != nullptr)
+        {
+            *errorMessageUtf8 = "PROJ 数据目录不能为空。";
+        }
+        return false;
+    }
+
+    std::wstring projDataDirectoryPath = GB_Utf8ToWString(trimmedProjDataDirectoryPathUtf8);
+    if (projDataDirectoryPath.empty())
+    {
+        if (errorMessageUtf8 != nullptr)
+        {
+            *errorMessageUtf8 = "PROJ 数据目录路径无法按 UTF-8 转换。";
+        }
+        return false;
+    }
+
+    if (FileExists(projDataDirectoryPath))
+    {
+        const std::wstring::size_type fileNameBeginIndex = projDataDirectoryPath.find_last_of(L"\\/");
+        const std::wstring fileName = projDataDirectoryPath.substr(fileNameBeginIndex == std::wstring::npos ? 0 : fileNameBeginIndex + 1);
+        if (EqualsIgnoreCaseAscii(fileName.c_str(), L"proj.db"))
+        {
+            projDataDirectoryPath = GetDirectoryFromFilePath(projDataDirectoryPath);
+        }
+    }
+
+    if (!DirectoryExists(projDataDirectoryPath))
+    {
+        if (errorMessageUtf8 != nullptr)
+        {
+            *errorMessageUtf8 = "PROJ 数据目录不存在或不是目录：" + trimmedProjDataDirectoryPathUtf8;
+        }
+        return false;
+    }
+
+    if (!DirectoryContainsFile(projDataDirectoryPath, L"proj.db"))
+    {
+        if (errorMessageUtf8 != nullptr)
+        {
+            *errorMessageUtf8 = "PROJ 数据目录中没有找到 proj.db：" + WideToUtf8(projDataDirectoryPath);
+        }
+        return false;
+    }
+
+    const std::string normalizedProjDataDirectoryUtf8 = WideToUtf8(projDataDirectoryPath);
+    if (normalizedProjDataDirectoryUtf8.empty())
+    {
+        if (errorMessageUtf8 != nullptr)
+        {
+            *errorMessageUtf8 = "PROJ 数据目录路径无法转换为 UTF-8：" + trimmedProjDataDirectoryPathUtf8;
+        }
+        return false;
+    }
+
+    EnsureRuntimeDependenciesLoadedInternal();
+    if (!runtimeDependenciesSucceeded)
+    {
+        if (errorMessageUtf8 != nullptr)
+        {
+            *errorMessageUtf8 = "无法加载关键运行时依赖，不能设置 PROJ 数据目录：" + WideToUtf8(runtimeDependencyFailureDllList);
+        }
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lockGuard(projDataDirectoryMutex);
+        ApplyProjDataDirectoryUtf8(normalizedProjDataDirectoryUtf8);
+        projDataDirectoryUtf8 = normalizedProjDataDirectoryUtf8;
+        projDataDirectorySource = ProjDataDirectorySource::Manual;
+    }
+
+    return true;
 }
