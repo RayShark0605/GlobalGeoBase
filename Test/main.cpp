@@ -1,9 +1,7 @@
 ﻿#include "GeoCrs.h"
-#include "GB_DelayLoadRuntime.h"
 
 int main(int argc, char* argv[])
 {
-	GB_InitializeRuntime();
 	GeoCrs crs1 = GeoCrs::FromUserInput("EPSG:4326");
 	GeoCrs crs2;
 	crs2.SetFromEpsg(4326);
