@@ -20,6 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DelayLoadRuntime.h" />
+    <ClInclude Include="GeoExtent.h" />
     <ClInclude Include="GeoCrs.h" />
     <ClInclude Include="GeoUtility.h" />
     <ClInclude Include="GlobalGeoBasePort.h" />
@@ -28,6 +29,7 @@
     <ClCompile Include="DelayLoadRuntime.cpp" />
     <ClCompile Include="DllMain.cpp" />
     <ClCompile Include="GeoCrs.cpp" />
+    <ClCompile Include="GeoExtent.cpp" />
     <ClCompile Include="GeoUtility.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
