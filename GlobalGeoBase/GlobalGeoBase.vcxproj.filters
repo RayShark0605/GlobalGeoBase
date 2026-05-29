@@ -30,6 +30,9 @@
     <ClInclude Include="GeoExtent.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="GeoGpkg.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="GeoCrs.cpp">
@@ -45,6 +48,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="GeoExtent.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="GeoGpkg.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
