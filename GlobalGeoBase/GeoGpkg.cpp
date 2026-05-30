@@ -2211,36 +2211,48 @@ bool GeoGpkg::QueryFeaturesByEnvelope(const std::string& tableNameUtf8, const GB
         parameters.push_back(queryEnvelope.maxY);
         parameters.push_back(queryEnvelope.minY);
 
-        GB_SqliteResult result;
-        if (!database_.Query(stream.str(), parameters, result))
+        bool buildFeatureFailed = false;
+        bool geometryEnvelopeFailed = false;
+        std::string geometryEnvelopeErrorMessageUtf8;
+        if (!database_.QueryEach(stream.str(), parameters, [&](const std::vector<GB_SqliteColumnInfo>& columns, const std::vector<GB_Variant>& values) -> bool
+            {
+                GeoGpkgFeature feature;
+                if (!BuildFeatureFromValues(columns, values, layerInfo, feature))
+                {
+                    buildFeatureFailed = true;
+                    return false;
+                }
+
+                GB_Rectangle featureEnvelope;
+                bool isEmpty = false;
+                std::string errorMessageUtf8;
+                if (!GetGeometryEnvelopeFromGpkgGeometry(feature.geometry, featureEnvelope, isEmpty, errorMessageUtf8))
+                {
+                    geometryEnvelopeFailed = true;
+                    geometryEnvelopeErrorMessageUtf8 = errorMessageUtf8;
+                    return false;
+                }
+
+                if (!isEmpty && IsRectangleIntersects(featureEnvelope, envelope))
+                {
+                    outFeatures.push_back(feature);
+                    if (maxFeatureCount > 0 && outFeatures.size() >= maxFeatureCount)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }))
         {
             return SetLastSqliteError(u8"使用 RTree 查询要素失败");
         }
-
-        outFeatures.reserve(std::min<std::size_t>(result.rows.size(), GB_GpkgMaxQueryReserveCount));
-        for (std::size_t rowIndex = 0; rowIndex < result.rows.size(); rowIndex++)
+        if (buildFeatureFailed)
         {
-            GeoGpkgFeature feature;
-            if (!BuildFeatureFromResultRow(result, rowIndex, layerInfo, feature))
-            {
-                return SetLastError(u8"构造要素结果失败。 ");
-            }
-
-            GB_Rectangle featureEnvelope;
-            bool isEmpty = false;
-            std::string errorMessageUtf8;
-            if (!GetGeometryEnvelopeFromGpkgGeometry(feature.geometry, featureEnvelope, isEmpty, errorMessageUtf8))
-            {
-                return SetLastError(u8"计算要素几何范围失败：" + errorMessageUtf8);
-            }
-            if (!isEmpty && IsRectangleIntersects(featureEnvelope, envelope))
-            {
-                outFeatures.push_back(feature);
-                if (maxFeatureCount > 0 && outFeatures.size() >= maxFeatureCount)
-                {
-                    break;
-                }
-            }
+            return SetLastError(u8"构造要素结果失败。 ");
+        }
+        if (geometryEnvelopeFailed)
+        {
+            return SetLastError(u8"计算要素几何范围失败：" + geometryEnvelopeErrorMessageUtf8);
         }
         return true;
     }
@@ -2966,7 +2978,10 @@ bool GeoGpkg::CreateGpkgGeometryFromWkb(const GB_ByteBuffer& wkb, int srsId, GB_
     }
     else if (!empty)
     {
-        CalculateWkbEnvelope(wkb, realEnvelope);
+        if (!CalculateWkbEnvelope(wkb, realEnvelope))
+        {
+            return false;
+        }
     }
 
     const bool useEnvelope = !empty && realEnvelope.IsValid();
