@@ -130,9 +130,63 @@ namespace
         return "rtree_" + tableNameUtf8 + "_" + geometryColumnNameUtf8;
     }
 
-    static std::string MakeTriggerName(const std::string& tableNameUtf8, const std::string& geometryColumnNameUtf8, const std::string& suffixUtf8)
+    static std::uint64_t CalculateFnv1a64Hash(const std::string& textUtf8)
+    {
+        std::uint64_t hashValue = 14695981039346656037ULL;
+        for (std::size_t index = 0; index < textUtf8.size(); index++)
+        {
+            hashValue ^= static_cast<unsigned char>(textUtf8[index]);
+            hashValue *= 1099511628211ULL;
+        }
+        return hashValue;
+    }
+
+    static std::string ToFixedHexString(std::uint64_t value)
+    {
+        static const char hexDigits[] = "0123456789abcdef";
+        std::string result(16, '0');
+        for (int index = 15; index >= 0; index--)
+        {
+            result[static_cast<std::size_t>(index)] = hexDigits[value & 0x0f];
+            value >>= 4;
+        }
+        return result;
+    }
+
+    static std::string MakeLegacyTriggerName(const std::string& tableNameUtf8, const std::string& geometryColumnNameUtf8, const std::string& suffixUtf8)
     {
         return MakeSafeObjectName("rtree_" + tableNameUtf8 + "_" + geometryColumnNameUtf8 + "_" + suffixUtf8);
+    }
+
+    static std::string MakeTriggerName(const std::string& tableNameUtf8, const std::string& geometryColumnNameUtf8, const std::string& suffixUtf8)
+    {
+        const std::string rawNameUtf8 = "rtree_" + tableNameUtf8 + "_" + geometryColumnNameUtf8 + "_" + suffixUtf8;
+        std::string safeNameUtf8 = MakeSafeObjectName(rawNameUtf8);
+        if (safeNameUtf8.size() > 96)
+        {
+            safeNameUtf8.resize(96);
+        }
+        return safeNameUtf8 + "_" + ToFixedHexString(CalculateFnv1a64Hash(rawNameUtf8));
+    }
+
+    static void AppendDropTriggerSql(std::ostringstream& ddl, std::set<std::string>& triggerNames, const std::string& triggerNameUtf8)
+    {
+        if (triggerNames.insert(triggerNameUtf8).second)
+        {
+            ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(triggerNameUtf8) << ";\n";
+        }
+    }
+
+    static void AppendDropSpatialIndexTriggerSql(std::ostringstream& ddl, const std::string& tableNameUtf8, const std::string& geometryColumnNameUtf8)
+    {
+        static const char* triggerSuffixes[] = { "insert", "update1", "update2", "update3", "update4", "update5", "update6", "update7", "delete" };
+        std::set<std::string> triggerNames;
+        for (std::size_t index = 0; index < sizeof(triggerSuffixes) / sizeof(triggerSuffixes[0]); index++)
+        {
+            const std::string suffixUtf8 = triggerSuffixes[index];
+            AppendDropTriggerSql(ddl, triggerNames, MakeTriggerName(tableNameUtf8, geometryColumnNameUtf8, suffixUtf8));
+            AppendDropTriggerSql(ddl, triggerNames, MakeLegacyTriggerName(tableNameUtf8, geometryColumnNameUtf8, suffixUtf8));
+        }
     }
 
     static int GetEnvelopeDoubleCount(int envelopeCode)
@@ -466,7 +520,7 @@ namespace
 
         bool ReadByte(unsigned char& outValue)
         {
-            if (position_ + 1 > size_)
+            if (!CanRead(1))
             {
                 return false;
             }
@@ -477,7 +531,7 @@ namespace
 
         bool ReadUInt32(bool littleEndian, std::uint32_t& outValue)
         {
-            if (position_ + 4 > size_)
+            if (!CanRead(4))
             {
                 return false;
             }
@@ -488,7 +542,7 @@ namespace
 
         bool ReadDouble(bool littleEndian, double& outValue)
         {
-            if (position_ + 8 > size_)
+            if (!CanRead(8))
             {
                 return false;
             }
@@ -498,6 +552,11 @@ namespace
         }
 
     private:
+        bool CanRead(std::size_t byteCount) const
+        {
+            return byteCount <= size_ && position_ <= size_ - byteCount;
+        }
+
         const unsigned char* dataPtr_ = nullptr;
         std::size_t size_ = 0;
         std::size_t position_ = 0;
@@ -2361,15 +2420,7 @@ bool GeoGpkg::CreateSpatialIndex(const std::string& tableNameUtf8, const std::st
 
     std::ostringstream ddl;
     ddl << "CREATE VIRTUAL TABLE IF NOT EXISTS " << quotedRtreeName << " USING rtree(id, minx, maxx, miny, maxy);\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerInsertName << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerUpdate1Name << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerUpdate2Name << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerUpdate3Name << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerUpdate4Name << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerUpdate5Name << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerUpdate6Name << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerUpdate7Name << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << triggerDeleteName << ";\n";
+    AppendDropSpatialIndexTriggerSql(ddl, layerInfo.tableNameUtf8, geometryColumnName);
 
     ddl << "CREATE TRIGGER " << triggerInsertName << " AFTER INSERT ON " << quotedTableName << "\n"
         << "WHEN (NEW." << quotedGeometryColumnName << " IS NOT NULL AND NOT ST_IsEmpty(NEW." << quotedGeometryColumnName << "))\n"
@@ -2446,15 +2497,7 @@ bool GeoGpkg::DropSpatialIndexNoLock(const std::string& tableNameUtf8, const std
     const std::string rtreeNameUtf8 = MakeRTreeName(layerInfo.tableNameUtf8, geometryColumnName);
 
     std::ostringstream ddl;
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "insert")) << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "update1")) << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "update2")) << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "update3")) << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "update4")) << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "update5")) << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "update6")) << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "update7")) << ";\n";
-    ddl << "DROP TRIGGER IF EXISTS " << QuoteIdentifier(MakeTriggerName(layerInfo.tableNameUtf8, geometryColumnName, "delete")) << ";\n";
+    AppendDropSpatialIndexTriggerSql(ddl, layerInfo.tableNameUtf8, geometryColumnName);
     ddl << "DROP TABLE IF EXISTS " << QuoteIdentifier(rtreeNameUtf8) << ";\n";
 
     if (!database_.ExecuteBatch(ddl.str()))
