@@ -2,6 +2,7 @@
 #define GLOBALBASE_GPKG_H_H
 
 #include "GB_BaseTypes.h"
+#include "CV/GB_Image.h"
 #include "GB_ReadWriteLock.h"
 #include "GB_Sqlite.h"
 #include "GB_Variant.h"
@@ -11,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -115,7 +117,7 @@ struct GeoGpkgFeatureLayerInfo
  * @brief 矢量要素记录。
  *
  * @details
- * geometry 按 GeoPackageBinary 存储，即 GPKG 几何头 + 标准 WKB。
+ * geometry 非空时按 GeoPackageBinary 存储，即 GPKG 几何头 + 标准 WKB；为空时表示 SQL NULL 几何。
  */
 struct GeoGpkgFeature
 {
@@ -253,10 +255,10 @@ public:
     /** @brief 获取单个矢量图层信息。 */
     bool GetFeatureLayerInfo(const std::string& tableNameUtf8, GeoGpkgFeatureLayerInfo& outLayer) const;
 
-    /** @brief 插入单个要素。geometry 必须是 GeoPackageBinary。 */
+    /** @brief 插入单个要素。geometry 非空时必须是 GeoPackageBinary；geometry 为空时写入 SQL NULL。 */
     bool InsertFeature(const std::string& tableNameUtf8, const GB_ByteBuffer& geometry, const std::map<std::string, GB_Variant>& attributes = std::map<std::string, GB_Variant>(), long long* outRowId = nullptr);
 
-    /** @brief 批量插入要素，内部使用显式事务，并校验属性字段、SRID 和 WKB 几何类型。 */
+    /** @brief 批量插入要素，内部使用显式事务，并校验属性字段、SRID 和 WKB 几何类型；空 geometry 会按 SQL NULL 写入。 */
     bool InsertFeatures(const std::string& tableNameUtf8, const std::vector<GeoGpkgFeature>& features, std::vector<long long>* outRowIds = nullptr);
 
     /** @brief 按外包矩形查询要素。若存在 rtree_<table>_<geometry>，优先使用 RTree，并对候选结果进行精确外包矩形二次过滤。 */
@@ -295,16 +297,22 @@ public:
     /** @brief 写入或覆盖单张瓦片。tileData 通常为 PNG、JPEG 或 WebP 字节。 */
     bool PutTile(const std::string& tableNameUtf8, int zoomLevel, int tileColumn, int tileRow, const GB_ByteBuffer& tileData);
 
+    /** @brief 批量写入或覆盖瓦片。内部只开启一次事务，并且只更新一次 gpkg_contents.last_change。 */
+    bool PutTiles(const std::string& tableNameUtf8, const std::vector<GeoGpkgTile>& tiles);
+
     /** @brief 读取单张瓦片。若不存在则返回 true 且 outExists=false。 */
     bool GetTile(const std::string& tableNameUtf8, int zoomLevel, int tileColumn, int tileRow, GB_ByteBuffer& outTileData, bool& outExists) const;
 
     /** @brief 按 zoom_level 读取一批瓦片。 */
     bool GetTiles(const std::string& tableNameUtf8, int zoomLevel, std::vector<GeoGpkgTile>& outTiles, std::size_t maxTileCount = 0) const;
 
+    /** @brief 删除单张瓦片。若瓦片不存在则返回 true 且 outDeleted=false。 */
+    bool DeleteTile(const std::string& tableNameUtf8, int zoomLevel, int tileColumn, int tileRow, bool* outDeleted = nullptr);
+
     /** @brief 删除内容表及其 GeoPackage 元数据。 */
     bool DropContentTable(const std::string& tableNameUtf8);
 
-    /** @brief 把标准 WKB 包装为 GeoPackageBinary。若 envelope 为空，会尝试从 WKB 计算二维范围。 */
+    /** @brief 把标准 WKB 包装为 GeoPackageBinary。若 envelope 为空，会尝试从 WKB 计算二维范围；empty=true 时要求 WKB 本身确实没有有效二维坐标；WKB 体不允许包含 EWKB 内嵌 SRID。 */
     static bool CreateGpkgGeometryFromWkb(const GB_ByteBuffer& wkb, int srsId, GB_ByteBuffer& outGpkgGeometry, const GB_Rectangle* envelope = nullptr, bool empty = false);
 
     /** @brief 解析 GeoPackageBinary 几何头，并校验魔数、版本、标志位和 envelope 合法性。 */
@@ -313,7 +321,7 @@ public:
     /** @brief 从 GeoPackageBinary 中取出标准 WKB。 */
     static bool ExtractWkbFromGpkgGeometry(const GB_ByteBuffer& gpkgGeometry, GB_ByteBuffer& outWkb);
 
-    /** @brief 从标准 WKB 中计算二维外包矩形。 */
+    /** @brief 从标准 WKB 中计算二维外包矩形；会校验集合子类型、线/环点数、Polygon ring 闭合性，CircularString 会按圆弧真实极值计算范围。 */
     static bool CalculateWkbEnvelope(const GB_ByteBuffer& wkb, GB_Rectangle& outEnvelope);
 
 private:
@@ -331,9 +339,104 @@ private:
 
 private:
     mutable GB_ReadWriteLock lock_;
+    mutable std::mutex lastErrorLock_;
     mutable std::string lastErrorUtf8_;
     GB_Sqlite database_;
 };
+
+/**
+ * @brief 从 GeoPackage 中读取单张瓦片并解码为 GB_Image。
+ *
+ * @param filePathUtf8 GeoPackage 文件路径，UTF-8 编码。
+ * @param tableNameUtf8 瓦片矩阵集名称，也是瓦片用户数据表名。
+ * @param zoomLevel 缩放层级。
+ * @param row 瓦片行号，对应 GeoPackage tile_row。
+ * @param col 瓦片列号，对应 GeoPackage tile_column。
+ * @param outImage 输出图像；失败时会被清空。
+ * @param loadOptions 图像解码选项。
+ * @return true 读取并解码成功；false 文件不存在、无法打开、矩阵集不存在、瓦片不存在或图像无效。
+ */
+GLOBALGEOBASE_PORT bool GeoGpkgReadTileImage(const std::string& filePathUtf8, const std::string& tableNameUtf8, int zoomLevel, int row, int col, GB_Image& outImage, const GB_ImageLoadOptions& loadOptions = GB_ImageLoadOptions());
+
+/**
+ * @brief GeoPackage 瓦片图像写入选项。
+ *
+ * @details
+ * 该结构只服务于 GeoGpkgWriteTileImage() 这类便捷接口：
+ * - 当目标瓦片矩阵集不存在时，必须提供 envelope、srsWktUtf8、matrixWidth、matrixHeight。
+ * - 当目标 zoom_level 不存在时，必须提供 matrixWidth、matrixHeight；tileWidth/tileHeight 为 0 时自动使用输入 GB_Image 的宽高。
+ * - srsWktUtf8 会按 gpkg_spatial_ref_sys.definition 精确匹配；若不存在，会自动创建一条新的空间参考记录。
+ */
+struct GeoGpkgTileImageWriteOptions
+{
+    /** @brief 瓦片矩阵集范围。仅在目标瓦片矩阵集不存在时必填。 */
+    GB_Rectangle envelope;
+
+    /** @brief 坐标系 WKT。仅在目标瓦片矩阵集不存在且需要创建空间参考时必填。 */
+    std::string srsWktUtf8 = "";
+
+    /** @brief 新建空间参考时优先使用的 srs_id；若小于等于 0 或已被占用，则自动生成新的 srs_id。 */
+    int preferredSrsId = 0;
+
+    /** @brief 新建空间参考记录的名称；为空时自动生成。 */
+    std::string srsNameUtf8 = "";
+
+    /** @brief 新建空间参考记录的组织名称；为空时使用 "NONE"。 */
+    std::string srsOrganizationUtf8 = "NONE";
+
+    /** @brief 新建空间参考记录的组织坐标系编号；为 0 时使用实际写入的 srs_id。 */
+    int srsOrganizationCoordsysId = 0;
+
+    /** @brief 新建瓦片矩阵集时写入 gpkg_contents.identifier；为空时使用 tableNameUtf8。 */
+    std::string identifierUtf8 = "";
+
+    /** @brief 新建瓦片矩阵集时写入 gpkg_contents.description。 */
+    std::string descriptionUtf8 = "";
+
+    /** @brief 当前 zoom_level 的矩阵列数。目标 zoom_level 不存在时必填。 */
+    int matrixWidth = 0;
+
+    /** @brief 当前 zoom_level 的矩阵行数。目标 zoom_level 不存在时必填。 */
+    int matrixHeight = 0;
+
+    /** @brief 当前 zoom_level 的瓦片像素宽度；为 0 时使用输入图像宽度。 */
+    int tileWidth = 0;
+
+    /** @brief 当前 zoom_level 的瓦片像素高度；为 0 时使用输入图像高度。 */
+    int tileHeight = 0;
+
+    /** @brief 写入 tile_data 前对 GB_Image 进行内存编码的格式，例如 ".png"、".jpg"、".webp"。 */
+    std::string imageFileExtUtf8 = ".png";
+
+    /** @brief 图像编码参数。 */
+    GB_ImageSaveOptions imageSaveOptions;
+};
+
+/**
+ * @brief 向 GeoPackage 写入或覆盖单张 GB_Image 瓦片。
+ *
+ * @param filePathUtf8 GeoPackage 文件路径，UTF-8 编码；文件不存在时自动创建，父目录不存在时自动递归创建。
+ * @param tableNameUtf8 瓦片矩阵集名称，也是瓦片用户数据表名。
+ * @param zoomLevel 缩放层级。
+ * @param row 瓦片行号，对应 GeoPackage tile_row。
+ * @param col 瓦片列号，对应 GeoPackage tile_column。
+ * @param image 输入图像，必须为非空有效图像。
+ * @param options 写入选项；当矩阵集或当前层级不存在时用于自动创建元数据。
+ * @return true 写入成功；false 路径无效、无法打开、图像无效、必要元数据缺失、行列越界或编码失败。
+ */
+GLOBALGEOBASE_PORT bool GeoGpkgWriteTileImage(const std::string& filePathUtf8, const std::string& tableNameUtf8, int zoomLevel, int row, int col, const GB_Image& image, const GeoGpkgTileImageWriteOptions& options = GeoGpkgTileImageWriteOptions());
+
+/**
+ * @brief 从 GeoPackage 中删除单张瓦片。
+ *
+ * @param filePathUtf8 GeoPackage 文件路径，UTF-8 编码。
+ * @param tableNameUtf8 瓦片矩阵集名称，也是瓦片用户数据表名。
+ * @param zoomLevel 缩放层级。
+ * @param row 瓦片行号，对应 GeoPackage tile_row。
+ * @param col 瓦片列号，对应 GeoPackage tile_column。
+ * @return true 删除成功；false 文件不存在、无法打开、矩阵集不存在、瓦片不存在或删除失败。
+ */
+GLOBALGEOBASE_PORT bool GeoGpkgDeleteTile(const std::string& filePathUtf8, const std::string& tableNameUtf8, int zoomLevel, int row, int col);
 
 #ifdef _MSC_VER
 #  pragma warning(pop)
