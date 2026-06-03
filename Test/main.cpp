@@ -1,5 +1,4 @@
 ﻿#include "GeoCrs.h"
-#include "GeoUtility.h"
 
 int main(int argc, char* argv[])
 {
